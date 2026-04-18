@@ -1,0 +1,16 @@
+# Uploaded user files (keep folder structure, ignore contents)
+uploads/portfolio/*
+uploads/avatar/*
+!uploads/portfolio/.gitkeep
+!uploads/avatar/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
