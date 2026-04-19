@@ -1,0 +1,26 @@
+# ArtisanConnect NG — InfinityFree .htaccess
+
+# Force PHP 8.x (InfinityFree supports this)
+AddType application/x-httpd-php81 .php
+
+# Disable directory listing
+Options -Indexes
+
+# Protect sensitive files
+<FilesMatch "^(config\.php|artisanconnect\.sql|README\.txt)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Allow uploads folder
+<Directory "uploads">
+    Options -ExecCGI
+    php_flag engine off
+</Directory>
+
+# Pretty error pages
+ErrorDocument 404 /404.php
+ErrorDocument 500 /500.php
+
+# Charset
+AddDefaultCharset UTF-8

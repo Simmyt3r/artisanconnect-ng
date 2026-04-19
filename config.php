@@ -5,9 +5,13 @@
 //  Compatible: InfinityFree / shared cPanel / PHP 7.4+ / MySQL 8
 // ============================================================
 
+// ── ERROR HANDLING (suppress warnings that trigger 500 on strict hosts)
+error_reporting(0);
+@ini_set('display_errors', 0);
+
 // ── DB CREDENTIALS (replace before uploading) ───────────────
 define('DB_HOST', 'localhost');            // InfinityFree: e.g. sql123.infinityfree.com
-define('DB_NAME', 'artisanconnect');       // your cPanel DB name
+define('DB_NAME', 'artisanconnect');       // your cPanel DB name (prefix_artisanconnect)
 define('DB_USER', 'your_db_user');         // cPanel MySQL username
 define('DB_PASS', 'your_db_password');     // cPanel MySQL password
 define('SITE_URL', '');                    // leave '' for relative paths
@@ -16,9 +20,9 @@ define('MAX_UPLOAD_MB', 5);
 
 // ── SESSION ─────────────────────────────────────────────────
 if (session_status() === PHP_SESSION_NONE) {
-    ini_set('session.cookie_httponly', 1);
-    ini_set('session.use_strict_mode', 1);
-    session_start();
+    @ini_set('session.cookie_httponly', 1);
+    @ini_set('session.use_strict_mode', 1);
+    @session_start();
 }
 
 // ── PDO SINGLETON ─────────────────────────────────────────
