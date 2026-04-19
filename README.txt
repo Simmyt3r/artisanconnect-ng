@@ -45,5 +45,7 @@ FEATURES:
 NOTE: Create /uploads/portfolio/ and /uploads/avatar/ folders on your server
       if they are not created automatically.
 
-Project: Peter Nice Benet (FT21BCMP0678) — Nasarawa State University, Keffi
-Supervisor: Dr. Kefas Yunana | March 2026
+Project Credit: 
+Sarverun Simeon Tertese 
+Peter Nice Renet
+March 2026
