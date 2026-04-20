@@ -1,79 +1,70 @@
 <?php
-// ArtisanConnect NG — Server Diagnostic
-// Upload this, visit it in browser, then DELETE it after fixing
+require_once 'config.php';  // uses the real credentials from config.php
+
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
 echo '<pre style="font-family:monospace;padding:20px;background:#1a1a1a;color:#0f0;font-size:13px">';
-echo "=== ArtisanConnect NG — Server Diagnostic ===\n\n";
+echo "=== ArtisanConnect NG — DB Diagnostic ===\n\n";
 
-// PHP Version
-echo "PHP Version:        " . PHP_VERSION . "\n";
-echo "PHP SAPI:           " . php_sapi_name() . "\n\n";
+echo "DB_HOST:  " . DB_HOST . "\n";
+echo "DB_NAME:  " . DB_NAME . "\n";
+echo "DB_USER:  " . DB_USER . "\n";
+echo "DB_PASS:  " . str_repeat('*', strlen(DB_PASS)) . "\n\n";
 
-// Required Extensions
-$extensions = ['pdo', 'pdo_mysql', 'session', 'fileinfo', 'mbstring', 'json'];
-echo "--- Extensions ---\n";
-foreach ($extensions as $ext) {
-    echo str_pad($ext, 20) . (extension_loaded($ext) ? "✓ OK" : "✗ MISSING") . "\n";
-}
-
-// Functions
-echo "\n--- Functions ---\n";
-$funcs = ['session_start', 'password_hash', 'password_verify', 'random_bytes', 'ini_set'];
-foreach ($funcs as $fn) {
-    echo str_pad($fn, 20) . (function_exists($fn) ? "✓ OK" : "✗ MISSING") . "\n";
-}
-
-// ini_set restrictions
-echo "\n--- ini_set Tests ---\n";
-$tests = ['session.cookie_httponly', 'session.use_strict_mode', 'display_errors'];
-foreach ($tests as $k) {
-    $r = @ini_set($k, 1);
-    echo str_pad($k, 30) . ($r !== false ? "✓ Allowed" : "✗ Restricted") . "\n";
-}
-
-// Session test
-echo "\n--- Session ---\n";
-if (session_status() === PHP_SESSION_NONE) {
-    $s = @session_start();
-    echo "session_start():    " . ($s ? "✓ OK" : "✗ FAILED") . "\n";
+// Test 1: raw TCP socket
+echo "--- Test 1: TCP Socket to DB_HOST:3306 ---\n";
+$sock = @fsockopen(DB_HOST, 3306, $errno, $errstr, 5);
+if ($sock) {
+    echo "TCP Connection:     ✓ Port 3306 reachable\n";
+    fclose($sock);
 } else {
-    echo "session_start():    ✓ Already active\n";
+    echo "TCP Connection:     ✗ FAILED — $errno: $errstr\n";
+    echo "  → Your host may block outbound 3306. Try port 3307 below.\n";
 }
 
-// DB Connection test
-echo "\n--- Database ---\n";
-$host = 'localhost';
-$name = 'artisanconnect';
-$user = 'your_db_user';   // ← Replace with real creds to test DB
-$pass = 'your_db_pass';   // ← Replace with real creds to test DB
+// Test 2: PDO with port 3306
+echo "\n--- Test 2: PDO Connection (port 3306) ---\n";
 try {
-    $pdo = new PDO("mysql:host=$host;dbname=$name;charset=utf8mb4", $user, $pass);
-    echo "DB Connection:      ✓ OK\n";
-    $v = $pdo->query("SELECT VERSION()")->fetchColumn();
-    echo "MySQL Version:      $v\n";
+    $pdo = new PDO(
+        'mysql:host=' . DB_HOST . ';port=3306;dbname=' . DB_NAME . ';charset=utf8mb4',
+        DB_USER, DB_PASS,
+        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 5]
+    );
+    echo "PDO (3306):         ✓ CONNECTED\n";
+    echo "MySQL Version:      " . $pdo->query("SELECT VERSION()")->fetchColumn() . "\n";
+    $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+    echo "Tables found:       " . implode(', ', $tables) . "\n";
 } catch (PDOException $e) {
-    echo "DB Connection:      ✗ FAILED\n";
+    echo "PDO (3306):         ✗ FAILED\n";
     echo "Error:              " . $e->getMessage() . "\n";
 }
 
-// Upload folder
-echo "\n--- Directories ---\n";
-$dirs = [
-    __DIR__ . '/uploads',
-    __DIR__ . '/uploads/portfolio',
-    __DIR__ . '/uploads/avatar',
-];
-foreach ($dirs as $d) {
-    $exists  = is_dir($d);
-    $writable = $exists && is_writable($d);
-    echo str_pad(basename($d) . '/', 20) . ($exists ? "✓ Exists " : "✗ Missing") . ($writable ? " ✓ Writable" : " ✗ Not Writable") . "\n";
+// Test 3: PDO with port 3307 (some shared hosts use this)
+echo "\n--- Test 3: PDO Connection (port 3307) ---\n";
+try {
+    $pdo2 = new PDO(
+        'mysql:host=' . DB_HOST . ';port=3307;dbname=' . DB_NAME . ';charset=utf8mb4',
+        DB_USER, DB_PASS,
+        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 5]
+    );
+    echo "PDO (3307):         ✓ CONNECTED\n";
+    echo "MySQL Version:      " . $pdo2->query("SELECT VERSION()")->fetchColumn() . "\n";
+} catch (PDOException $e) {
+    echo "PDO (3307):         ✗ FAILED — " . $e->getMessage() . "\n";
 }
 
-echo "\n--- Server Info ---\n";
-echo "SERVER_SOFTWARE:    " . ($_SERVER['SERVER_SOFTWARE'] ?? 'unknown') . "\n";
-echo "DOCUMENT_ROOT:      " . ($_SERVER['DOCUMENT_ROOT'] ?? 'unknown') . "\n";
+// Test 4: config.php db() function
+echo "\n--- Test 4: config.php db() singleton ---\n";
+try {
+    $result = db()->query("SELECT COUNT(*) FROM users")->fetchColumn();
+    echo "db() function:      ✓ WORKS — users table has $result row(s)\n";
+} catch (Throwable $e) {
+    echo "db() function:      ✗ FAILED — " . $e->getMessage() . "\n";
+}
 
-echo "\n✓ Diagnostic complete. DELETE this file after reviewing.\n";
+echo "\n--- Session ---\n";
+echo "Session status:     " . (session_status() === PHP_SESSION_ACTIVE ? "✓ Active" : "✗ Inactive") . "\n";
+
+echo "\n✓ Done. DELETE this file after reviewing!\n";
 echo '</pre>';
