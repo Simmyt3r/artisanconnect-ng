@@ -1,70 +1,59 @@
 <?php
-require_once 'config.php';  // uses the real credentials from config.php
-
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
-
 echo '<pre style="font-family:monospace;padding:20px;background:#1a1a1a;color:#0f0;font-size:13px">';
-echo "=== ArtisanConnect NG — DB Diagnostic ===\n\n";
+echo "=== Deep Error Trace ===\n\n";
 
-echo "DB_HOST:  " . DB_HOST . "\n";
-echo "DB_NAME:  " . DB_NAME . "\n";
-echo "DB_USER:  " . DB_USER . "\n";
-echo "DB_PASS:  " . str_repeat('*', strlen(DB_PASS)) . "\n\n";
+// Capture any fatal errors from including each file
+$files = ['config.php', 'index.php', 'auth.php', 'profile.php', 'dashboard.php', 'messages.php', 'admin.php'];
 
-// Test 1: raw TCP socket
-echo "--- Test 1: TCP Socket to DB_HOST:3306 ---\n";
-$sock = @fsockopen(DB_HOST, 3306, $errno, $errstr, 5);
-if ($sock) {
-    echo "TCP Connection:     ✓ Port 3306 reachable\n";
-    fclose($sock);
-} else {
-    echo "TCP Connection:     ✗ FAILED — $errno: $errstr\n";
-    echo "  → Your host may block outbound 3306. Try port 3307 below.\n";
+foreach ($files as $f) {
+    echo "--- Testing: $f ---\n";
+    $output = shell_exec("php -d display_errors=1 -d error_reporting=32767 -l " . escapeshellarg(__DIR__ . '/' . $f) . " 2>&1");
+    echo $output . "\n";
 }
 
-// Test 2: PDO with port 3306
-echo "\n--- Test 2: PDO Connection (port 3306) ---\n";
+// Test config.php inclusion specifically
+echo "--- Including config.php ---\n";
+ob_start();
 try {
-    $pdo = new PDO(
-        'mysql:host=' . DB_HOST . ';port=3306;dbname=' . DB_NAME . ';charset=utf8mb4',
-        DB_USER, DB_PASS,
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 5]
-    );
-    echo "PDO (3306):         ✓ CONNECTED\n";
-    echo "MySQL Version:      " . $pdo->query("SELECT VERSION()")->fetchColumn() . "\n";
-    $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
-    echo "Tables found:       " . implode(', ', $tables) . "\n";
-} catch (PDOException $e) {
-    echo "PDO (3306):         ✗ FAILED\n";
-    echo "Error:              " . $e->getMessage() . "\n";
-}
-
-// Test 3: PDO with port 3307 (some shared hosts use this)
-echo "\n--- Test 3: PDO Connection (port 3307) ---\n";
-try {
-    $pdo2 = new PDO(
-        'mysql:host=' . DB_HOST . ';port=3307;dbname=' . DB_NAME . ';charset=utf8mb4',
-        DB_USER, DB_PASS,
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 5]
-    );
-    echo "PDO (3307):         ✓ CONNECTED\n";
-    echo "MySQL Version:      " . $pdo2->query("SELECT VERSION()")->fetchColumn() . "\n";
-} catch (PDOException $e) {
-    echo "PDO (3307):         ✗ FAILED — " . $e->getMessage() . "\n";
-}
-
-// Test 4: config.php db() function
-echo "\n--- Test 4: config.php db() singleton ---\n";
-try {
-    $result = db()->query("SELECT COUNT(*) FROM users")->fetchColumn();
-    echo "db() function:      ✓ WORKS — users table has $result row(s)\n";
+    require_once __DIR__ . '/config.php';
+    echo "config.php:   OK\n";
 } catch (Throwable $e) {
-    echo "db() function:      ✗ FAILED — " . $e->getMessage() . "\n";
+    echo "config.php:   FAILED: " . $e->getMessage() . " on line " . $e->getLine() . "\n";
+}
+ob_end_clean();
+
+// Test CSS function specifically
+echo "\n--- Testing css() function ---\n";
+try {
+    $css = css();
+    echo "css():        OK (" . strlen($css) . " bytes)\n";
+} catch (Throwable $e) {
+    echo "css():        FAILED: " . $e->getMessage() . "\n";
 }
 
-echo "\n--- Session ---\n";
-echo "Session status:     " . (session_status() === PHP_SESSION_ACTIVE ? "✓ Active" : "✗ Inactive") . "\n";
+// Test head() function
+echo "\n--- Testing head() function ---\n";
+ob_start();
+try {
+    head('Test');
+    echo "\nhead():       OK\n";
+} catch (Throwable $e) {
+    echo "\nhead():       FAILED: " . $e->getMessage() . " on line " . $e->getLine() . "\n";
+}
+ob_end_clean();
 
-echo "\n✓ Done. DELETE this file after reviewing!\n";
+// Check for PHP fatal error handler
+echo "\n--- PHP Error Log (last 20 lines) ---\n";
+$logFile = ini_get('error_log');
+echo "Error log:    " . ($logFile ?: 'not set') . "\n";
+if ($logFile && file_exists($logFile)) {
+    $lines = array_slice(file($logFile), -20);
+    foreach ($lines as $line) echo $line;
+} else {
+    echo "(no log file accessible)\n";
+}
+
+echo "\nDELETE this file after debugging!\n";
 echo '</pre>';
