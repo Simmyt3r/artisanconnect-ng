@@ -10,10 +10,10 @@ error_reporting(0);
 @ini_set('display_errors', 0);
 
 // ── DB CREDENTIALS (replace before uploading) ───────────────
-define('DB_HOST', 'localhost');            // InfinityFree: e.g. sql123.infinityfree.com
-define('DB_NAME', 'artisanconnect');       // your cPanel DB name (prefix_artisanconnect)
-define('DB_USER', 'your_db_user');         // cPanel MySQL username
-define('DB_PASS', 'your_db_password');     // cPanel MySQL password
+define('DB_HOST', 'sql104.infinityfree.com');
+define('DB_NAME', 'if0_41563326_artisanconnect');
+define('DB_USER', 'if0_41563326');
+define('DB_PASS', 'GmAegvcQsTxPty');
 define('SITE_URL', '');                    // leave '' for relative paths
 define('UPLOAD_DIR', __DIR__ . '/uploads/');
 define('MAX_UPLOAD_MB', 5);
