@@ -27,7 +27,7 @@ DEFAULT CREDENTIALS (from the SQL seed data):
   Admin:    admin@artisanconnect.ng  / Admin@1234
   Artisan:  chukwu@demo.ng          / Test@1234
   Customer: customer@demo.ng        / Test@1234
-
+NB: if the credentails are not working, change credentials
 FEATURES:
   ✓ Artisan registration with trade & location
   ✓ Portfolio image upload & gallery
