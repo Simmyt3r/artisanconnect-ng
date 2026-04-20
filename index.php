@@ -22,7 +22,7 @@ $perPage = 9;
 $offset  = ($page - 1) * $perPage;
 
 $where = ['a.verification_status = ?', 'a.is_available = 1'];
-$params = ['verified', 1];
+$params = ['verified']; // Note: is_available = 1 is hardcoded, no placeholder needed
 
 if ($trade) { $where[] = 'a.trade_category = ?'; $params[] = $trade; }
 if ($state) { $where[] = 'a.state_of_operation = ?'; $params[] = $state; }
