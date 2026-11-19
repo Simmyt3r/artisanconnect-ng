@@ -49,6 +49,13 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='book') {
     $sid    = (int)($_POST['service_id']??0) ?: null;
     $price  = (float)($_POST['agreed_price']??0) ?: null;
     if (!$desc) { flash('error','Please describe the work you need.'); redirect("profile.php?id=$pid"); }
+    if ($price !== null && $price < 0) { flash('error','Budget cannot be negative.'); redirect("profile.php?id=$pid"); }
+    if ($a['verification_status'] !== 'verified' || !(int)$a['is_available']) { flash('error','This artisan is not currently available for bookings.'); redirect("profile.php?id=$pid"); }
+    if ($sid !== null) {
+        $serviceCheck = db()->prepare("SELECT service_id FROM services WHERE service_id=? AND artisan_id=? AND is_active=1");
+        $serviceCheck->execute([$sid, $pid]);
+        if (!$serviceCheck->fetch()) { flash('error','Please select a valid service.'); redirect("profile.php?id=$pid"); }
+    }
 
     $ins = db()->prepare("INSERT INTO bookings (customer_user_id,artisan_id,service_id,booking_description,agreed_price) VALUES (?,?,?,?,?)");
     $ins->execute([uid(),$pid,$sid,$desc,$price]);
@@ -68,9 +75,16 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='start_conv'
     $c = db()->prepare("SELECT conversation_id FROM conversations WHERE user1_id=? AND user2_id=?");
     $c->execute([$u1,$u2]); $conv = $c->fetch();
     if (!$conv) {
-        $ic = db()->prepare("INSERT INTO conversations (user1_id,user2_id) VALUES (?,?)");
-        $ic->execute([$u1,$u2]);
-        $convId = db()->lastInsertId();
+        try {
+            $ic = db()->prepare("INSERT INTO conversations (user1_id,user2_id) VALUES (?,?)");
+            $ic->execute([$u1,$u2]);
+            $convId = db()->lastInsertId();
+        } catch (PDOException $ex) {
+            // Another request may have created the unique conversation first.
+            $c->execute([$u1,$u2]); $existing = $c->fetch();
+            if (!$existing) throw $ex;
+            $convId = $existing['conversation_id'];
+        }
     } else { $convId = $conv['conversation_id']; }
     redirect("messages.php?conv=$convId");
 }
@@ -140,7 +154,7 @@ head(e($fullName).' — Artisan Profile');
     <?php if($portfolio): ?>
     <div class="pg">
      <?php foreach($portfolio as $i=>$p): ?>
-     <div class="pi" onclick="showLb('<?=e(imgUrl($p['image_path']))?>','<?=e(addslashes($p['item_title']))?>')">
+     <div class="pi" onclick='showLb(<?=e(json_encode(imgUrl($p['image_path']), JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP))?>,<?=e(json_encode($p['item_title'], JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP))?>)'>
       <img src="<?=e(imgUrl($p['image_path']))?>" alt="<?=e($p['item_title'])?>" loading="lazy">
       <div class="pio"><?=e($p['item_title'])?></div>
      </div>
