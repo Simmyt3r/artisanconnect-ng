@@ -22,13 +22,23 @@ $pf->execute([$pid]); $portfolio = $pf->fetchAll();
 $sv = db()->prepare("SELECT * FROM services WHERE artisan_id=? AND is_active=1 ORDER BY created_at");
 $sv->execute([$pid]); $services = $sv->fetchAll();
 
-// Reviews
+// Use the same review rows for the rating, count, and list.
+$reviewFrom = 'FROM reviews r JOIN users u ON r.customer_user_id=u.user_id WHERE r.artisan_id=?';
+$reviewStats = db()->prepare("SELECT COUNT(*) AS total, AVG(r.overall_rating) AS average_rating $reviewFrom");
+$reviewStats->execute([$pid]);
+$rating = $reviewStats->fetch();
+$reviewCount = (int)$rating['total'];
+$reviewsPerPage = 20;
+$reviewPages = max(1, (int)ceil($reviewCount / $reviewsPerPage));
+$reviewPage = min($reviewPages, max(1, filter_var($_GET['reviews_page'] ?? 1, FILTER_VALIDATE_INT) ?: 1));
+$reviewOffset = ($reviewPage - 1) * $reviewsPerPage;
+$showReviews = isset($_GET['reviews_page']);
 $rv = db()->prepare("
-    SELECT r.*, u.first_name, u.last_name
-    FROM reviews r JOIN users u ON r.customer_user_id=u.user_id
-    WHERE r.artisan_id=? ORDER BY r.created_at DESC LIMIT 20
+    SELECT r.*, u.first_name, u.last_name $reviewFrom
+    ORDER BY r.created_at DESC, r.review_id DESC LIMIT $reviewsPerPage OFFSET $reviewOffset
 ");
-$rv->execute([$pid]); $reviews = $rv->fetchAll();
+$rv->execute([$pid]);
+$reviews = $rv->fetchAll();
 
 // ── HANDLE BOOKING SUBMIT ─────────────────────────────────
 if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='book') {
@@ -85,7 +95,9 @@ head(e($fullName).' — Artisan Profile');
    </div>
    <p style="opacity:.88;margin-bottom:.4rem">🛠 <?=e($a['trade_category'])?><?=$a['trade_subcategory']?' — '.e($a['trade_subcategory']):''; ?> · 📍 <?=e($a['lga_of_operation'])?>, <?=e($a['state_of_operation'])?></p>
    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;opacity:.9">
-    <?=stars((float)$a['average_rating'])?> <span style="font-size:.85rem">(<?=e($a['total_reviews'])?> review<?=$a['total_reviews']!=1?'s':''?>)</span>
+    <?php if ($reviewCount > 0): ?>
+    <?=stars((float)$rating['average_rating'])?> <span style="font-size:.85rem">(<?=$reviewCount?> review<?=$reviewCount!==1?'s':''?>)</span>
+    <?php else: ?><span style="font-size:.85rem">No reviews yet</span><?php endif ?>
     · <span style="font-size:.85rem">⏱ <?=$a['years_experience']?> yrs experience</span>
     · <span style="font-size:.85rem">📅 Joined <?=date('M Y',strtotime($a['joined']))?></span>
    </div>
@@ -118,13 +130,13 @@ head(e($fullName).' — Artisan Profile');
 
    <!-- TABS: Portfolio / Services / Reviews -->
    <div class="tabs">
-    <button class="tab on" onclick="sw('portfolio')">🖼 Portfolio (<?=count($portfolio)?>)</button>
+    <button class="tab <?=$showReviews?'':'on'?>" onclick="sw('portfolio')">🖼 Portfolio (<?=count($portfolio)?>)</button>
     <button class="tab" onclick="sw('services')">🛠 Services (<?=count($services)?>)</button>
-    <button class="tab" onclick="sw('reviews')">⭐ Reviews (<?=$a['total_reviews']?>)</button>
+    <button class="tab <?=$showReviews?'on':''?>" onclick="sw('reviews')">⭐ Reviews (<?=$reviewCount?>)</button>
    </div>
 
    <!-- PORTFOLIO -->
-   <div id="tp-portfolio" class="tp on">
+   <div id="tp-portfolio" class="tp <?=$showReviews?'':'on'?>">
     <?php if($portfolio): ?>
     <div class="pg">
      <?php foreach($portfolio as $i=>$p): ?>
@@ -159,7 +171,7 @@ head(e($fullName).' — Artisan Profile');
    </div>
 
    <!-- REVIEWS -->
-   <div id="tp-reviews" class="tp">
+   <div id="tp-reviews" class="tp <?=$showReviews?'on':''?>">
     <?php if($reviews): ?>
     <?php foreach($reviews as $rv): ?>
     <div class="card" style="margin-bottom:.9rem">
@@ -182,7 +194,18 @@ head(e($fullName).' — Artisan Profile');
      <?php endif ?>
     </div>
     <?php endforeach ?>
-    <?php else: ?><div class="es"><div class="ei">⭐</div><p>No reviews yet. Be the first to review!</p></div><?php endif ?>
+    <?php if ($reviewPages > 1): ?>
+    <nav aria-label="Review pages" style="display:flex;align-items:center;justify-content:center;gap:.8rem">
+     <?php if ($reviewPage > 1): ?>
+     <a class="btn btn-o btn-sm" href="profile.php?id=<?=$pid?>&amp;reviews_page=<?=$reviewPage-1?>#tp-reviews">Previous</a>
+     <?php endif ?>
+     <span>Page <?=$reviewPage?> of <?=$reviewPages?></span>
+     <?php if ($reviewPage < $reviewPages): ?>
+     <a class="btn btn-o btn-sm" href="profile.php?id=<?=$pid?>&amp;reviews_page=<?=$reviewPage+1?>#tp-reviews">Next</a>
+     <?php endif ?>
+    </nav>
+    <?php endif ?>
+    <?php else: ?><div class="es"><div class="ei">⭐</div><p>No reviews yet.</p></div><?php endif ?>
    </div>
   </div>
 

@@ -2,105 +2,159 @@
 require_once 'config.php';
 requireAdmin();
 
-$csrf  = csrf();
-$myId  = uid();
+$csrf = csrf();
+$myId = uid();
 
-// ── HANDLE ADMIN ACTIONS ─────────────────────────────────────
+$tabs = [
+    'overview' => '📊 Overview',
+    'artisans' => '🔨 Artisans',
+    'users' => '👥 Users',
+    'bookings' => '📋 Bookings',
+    'reviews' => '⭐ Reviews',
+];
+$tab = $_GET['t'] ?? 'overview';
+if (!is_string($tab) || !isset($tabs[$tab])) {
+    $tab = 'overview';
+}
+$search = is_string($_GET['q'] ?? null) ? trim($_GET['q']) : '';
+$verificationOptions = [
+    '' => 'All verification statuses',
+    'needs_verification' => 'Needs verification',
+    'pending' => 'Pending',
+    'unverified' => 'Unverified',
+    'verified' => 'Verified',
+];
+$verification = $_GET['verification'] ?? '';
+if ($tab !== 'artisans' || !is_string($verification) || !isset($verificationOptions[$verification])) {
+    $verification = '';
+}
+$page = max(1, filter_var($_GET['page'] ?? 1, FILTER_VALIDATE_INT) ?: 1);
+$listQuery = array_filter(['t'=>$tab, 'q'=>$search, 'verification'=>$verification], static fn($value) => $value !== '');
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verifyCsrf();
     $action = $_POST['action'] ?? '';
-
-    // Verify artisan
-    if ($action === 'verify_artisan') {
-        $pid = (int)($_POST['profile_id'] ?? 0);
-        db()->prepare("UPDATE artisan_profiles SET verification_status='verified' WHERE profile_id=?")->execute([$pid]);
-        flash('success', 'Artisan verified successfully.');
-        redirect('admin.php?t=artisans');
+    $destination = $listQuery + ['page'=>$page];
+    $verificationStatuses = ['verify_artisan'=>'verified', 'unverify_artisan'=>'unverified'];
+    try {
+        if (is_string($action) && isset($verificationStatuses[$action])) {
+            $pid = filter_var($_POST['profile_id'] ?? null, FILTER_VALIDATE_INT);
+            $status = $verificationStatuses[$action];
+            $stmt = db()->prepare("UPDATE artisan_profiles SET verification_status=? WHERE profile_id=? AND verification_status<>?");
+            $stmt->execute([$status, $pid ?: 0, $status]);
+            if ($stmt->rowCount() === 1) {
+                flash('success', $status === 'verified' ? 'Artisan verified.' : 'Artisan verification revoked.');
+            } else {
+                flash('error', 'No verification change. The artisan is missing or already has that status.');
+            }
+        } elseif ($action === 'delete_user') {
+            $userId = filter_var($_POST['user_id'] ?? null, FILTER_VALIDATE_INT);
+            if ($userId === $myId) {
+                flash('error', 'You cannot delete your own account.');
+            } else {
+                $stmt = db()->prepare("DELETE FROM users WHERE user_id=?");
+                $stmt->execute([$userId ?: 0]);
+                flash($stmt->rowCount() === 1 ? 'success' : 'error',
+                    $stmt->rowCount() === 1 ? 'User deleted.' : 'User not found. No account was deleted.');
+            }
+        } elseif ($action === 'toggle_available') {
+            $pid = filter_var($_POST['profile_id'] ?? null, FILTER_VALIDATE_INT);
+            $stmt = db()->prepare("UPDATE artisan_profiles SET is_available = NOT COALESCE(is_available, 0) WHERE profile_id=?");
+            $stmt->execute([$pid ?: 0]);
+            flash($stmt->rowCount() === 1 ? 'success' : 'error',
+                $stmt->rowCount() === 1 ? 'Availability updated.' : 'Artisan not found. No availability changed.');
+        } else {
+            flash('error', 'Unknown admin action.');
+        }
+    } catch (PDOException $error) {
+        error_log('Admin action failed: ' . $error->getCode());
+        flash('error', 'The action could not be completed. Try again.');
     }
-
-    // Unverify artisan
-    if ($action === 'unverify_artisan') {
-        $pid = (int)($_POST['profile_id'] ?? 0);
-        db()->prepare("UPDATE artisan_profiles SET verification_status='unverified' WHERE profile_id=?")->execute([$pid]);
-        flash('success', 'Artisan verification revoked.');
-        redirect('admin.php?t=artisans');
-    }
-
-    // Delete user
-    if ($action === 'delete_user') {
-        $uid2 = (int)($_POST['user_id'] ?? 0);
-        if ($uid2 === $myId) { flash('error', 'You cannot delete your own account.'); redirect('admin.php?t=users'); }
-        db()->prepare("DELETE FROM users WHERE user_id=?")->execute([$uid2]);
-        flash('success', 'User deleted.');
-        redirect('admin.php?t=users');
-    }
-
-    // Toggle availability
-    if ($action === 'toggle_available') {
-        $pid = (int)($_POST['profile_id']??0);
-        db()->prepare("UPDATE artisan_profiles SET is_available = NOT is_available WHERE profile_id=?")->execute([$pid]);
-        flash('success','Availability toggled.'); redirect('admin.php?t=artisans');
-    }
+    redirect('admin.php?' . http_build_query($destination));
 }
 
-// ── STATS ────────────────────────────────────────────────────
-$stats = [
-    'total_users'     => db()->query("SELECT COUNT(*) FROM users")->fetchColumn(),
-    'total_artisans'  => db()->query("SELECT COUNT(*) FROM artisan_profiles")->fetchColumn(),
-    'verified'        => db()->query("SELECT COUNT(*) FROM artisan_profiles WHERE verification_status='verified'")->fetchColumn(),
-    'customers'       => db()->query("SELECT COUNT(*) FROM users WHERE role='customer'")->fetchColumn(),
-    'total_bookings'  => db()->query("SELECT COUNT(*) FROM bookings")->fetchColumn(),
-    'completed'       => db()->query("SELECT COUNT(*) FROM bookings WHERE status='completed'")->fetchColumn(),
-    'pending'         => db()->query("SELECT COUNT(*) FROM bookings WHERE status='pending'")->fetchColumn(),
-    'total_reviews'   => db()->query("SELECT COUNT(*) FROM reviews")->fetchColumn(),
-    'avg_rating'      => db()->query("SELECT AVG(overall_rating) FROM reviews")->fetchColumn(),
-    'total_messages'  => db()->query("SELECT COUNT(*) FROM messages")->fetchColumn(),
-];
+$perPage = 25;
+if ($tab === 'overview') {
+    $stats = [
+        'total_users'    => db()->query("SELECT COUNT(*) FROM users")->fetchColumn(),
+        'total_artisans' => db()->query("SELECT COUNT(*) FROM artisan_profiles")->fetchColumn(),
+        'verified'       => db()->query("SELECT COUNT(*) FROM artisan_profiles WHERE verification_status='verified'")->fetchColumn(),
+        'needs_verification' => db()->query("SELECT COUNT(*) FROM artisan_profiles WHERE verification_status IN ('pending','unverified')")->fetchColumn(),
+        'total_bookings' => db()->query("SELECT COUNT(*) FROM bookings")->fetchColumn(),
+        'completed'      => db()->query("SELECT COUNT(*) FROM bookings WHERE status='completed'")->fetchColumn(),
+        'pending'        => db()->query("SELECT COUNT(*) FROM bookings WHERE status='pending'")->fetchColumn(),
+        'total_reviews'  => db()->query("SELECT COUNT(*) FROM reviews r JOIN users u ON u.user_id=r.customer_user_id")->fetchColumn(),
+        'total_messages' => db()->query("SELECT COUNT(*) FROM messages")->fetchColumn(),
+    ];
+} else {
+    $conditions = [];
+    $params = [];
+    $needle = '%' . strtr(preg_replace('/\s+/', ' ', $search), ['!' => '!!', '%' => '!%', '_' => '!_']) . '%';
 
-// ── FETCH DATA BASED ON TAB ───────────────────────────────
-$tab  = $_GET['t'] ?? 'overview';
-$search = trim($_GET['q'] ?? '');
-
-// Artisans list
-$aFilter = $search ? "AND (u.first_name LIKE ? OR u.last_name LIKE ? OR a.trade_category LIKE ?)" : '';
-$aParams = $search ? ["%$search%","%$search%","%$search%"] : [];
-$artisansStmt = db()->prepare("
-    SELECT a.*, u.first_name, u.last_name, u.email, u.phone, u.created_at AS joined, u.user_id AS uid
-    FROM artisan_profiles a JOIN users u ON a.user_id=u.user_id
-    WHERE 1=1 $aFilter
-    ORDER BY a.created_at DESC LIMIT 100
-");
-$artisansStmt->execute($aParams);
-$artisans = $artisansStmt->fetchAll();
-
-// Users list
-$uFilter = $search ? "AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ?)" : '';
-$uParams = $search ? ["%$search%","%$search%","%$search%"] : [];
-$usersStmt = db()->prepare("SELECT * FROM users WHERE 1=1 $uFilter ORDER BY created_at DESC LIMIT 100");
-$usersStmt->execute($uParams);
-$users = $usersStmt->fetchAll();
-
-// Recent bookings
-$bookings = db()->query("
-    SELECT b.*, u.first_name AS cust_first, u.last_name AS cust_last,
-           u2.first_name AS art_first, u2.last_name AS art_last, ap.trade_category
-    FROM bookings b
-    JOIN users u ON b.customer_user_id=u.user_id
-    JOIN artisan_profiles ap ON b.artisan_id=ap.profile_id
-    JOIN users u2 ON ap.user_id=u2.user_id
-    ORDER BY b.created_at DESC LIMIT 50
-")->fetchAll();
-
-// Recent reviews
-$reviews = db()->query("
-    SELECT r.*, u.first_name AS cust_first, u.last_name AS cust_last,
-           u2.first_name AS art_first, u2.last_name AS art_last
-    FROM reviews r
-    JOIN users u ON r.customer_user_id=u.user_id
-    JOIN artisan_profiles ap ON r.artisan_id=ap.profile_id
-    JOIN users u2 ON ap.user_id=u2.user_id
-    ORDER BY r.created_at DESC LIMIT 30
-")->fetchAll();
+    switch ($tab) {
+        case 'artisans':
+            $from = 'FROM artisan_profiles a JOIN users u ON u.user_id=a.user_id';
+            $select = 'a.profile_id, a.trade_category, a.trade_subcategory, a.lga_of_operation,
+                a.state_of_operation, a.verification_status, a.is_available,
+                u.first_name, u.last_name, u.email, u.created_at AS joined, u.user_id AS uid,
+                COALESCE(ratings.average_rating, 0) AS average_rating,
+                COALESCE(ratings.total_reviews, 0) AS total_reviews';
+            $extraJoin = 'LEFT JOIN (
+                SELECT r.artisan_id, COUNT(*) AS total_reviews, AVG(r.overall_rating) AS average_rating
+                FROM reviews r JOIN users reviewer ON reviewer.user_id = r.customer_user_id
+                GROUP BY r.artisan_id
+            ) ratings ON ratings.artisan_id=a.profile_id';
+            $order = 'a.created_at DESC, a.profile_id DESC';
+            if ($search !== '') {
+                $conditions[] = "(CONCAT_WS(' ', u.first_name, u.last_name) LIKE ? ESCAPE '!'
+                    OR u.email LIKE ? ESCAPE '!' OR a.trade_category LIKE ? ESCAPE '!'
+                    OR a.trade_subcategory LIKE ? ESCAPE '!' OR a.state_of_operation LIKE ? ESCAPE '!'
+                    OR a.lga_of_operation LIKE ? ESCAPE '!')";
+                $params = array_fill(0, 6, $needle);
+            }
+            if ($verification === 'needs_verification') {
+                $conditions[] = "a.verification_status IN ('pending', 'unverified')";
+            } elseif ($verification !== '') {
+                $conditions[] = 'a.verification_status=?';
+                $params[] = $verification;
+            }
+            break;
+        case 'users':
+            $from = 'FROM users';
+            $select = 'user_id, first_name, last_name, email, phone, role, created_at';
+            $order = 'created_at DESC, user_id DESC';
+            if ($search !== '') {
+                $conditions[] = "(CONCAT_WS(' ', first_name, last_name) LIKE ? ESCAPE '!' OR email LIKE ? ESCAPE '!')";
+                $params = [$needle, $needle];
+            }
+            break;
+        case 'bookings':
+            $from = 'FROM bookings b JOIN users u ON u.user_id=b.customer_user_id
+                JOIN artisan_profiles ap ON ap.profile_id=b.artisan_id JOIN users u2 ON u2.user_id=ap.user_id';
+            $select = 'b.booking_description, b.agreed_price, b.status, b.created_at, ap.trade_category,
+                u.first_name AS cust_first, u.last_name AS cust_last, u2.first_name AS art_first, u2.last_name AS art_last';
+            $order = 'b.created_at DESC, b.booking_id DESC';
+            break;
+        case 'reviews':
+            $from = 'FROM reviews r JOIN users u ON u.user_id=r.customer_user_id
+                JOIN artisan_profiles ap ON ap.profile_id=r.artisan_id JOIN users u2 ON u2.user_id=ap.user_id';
+            $select = 'r.overall_rating, r.review_title, r.created_at,
+                u.first_name AS cust_first, u.last_name AS cust_last, u2.first_name AS art_first, u2.last_name AS art_last';
+            $order = 'r.created_at DESC, r.review_id DESC';
+            break;
+    }
+    $where = $conditions ? 'WHERE ' . implode(' AND ', $conditions) : '';
+    $count = db()->prepare("SELECT COUNT(*) $from $where");
+    $count->execute($params);
+    $total = (int)$count->fetchColumn();
+    $totalPages = max(1, (int)ceil($total / $perPage));
+    $page = min($page, $totalPages);
+    $offset = ($page - 1) * $perPage;
+    $join = $extraJoin ?? '';
+    $stmt = db()->prepare("SELECT $select $from $join $where ORDER BY $order LIMIT $perPage OFFSET $offset");
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll();
+}
 
 $statusColors = ['pending'=>'#ed8936','accepted'=>'#48bb78','declined'=>'#e53e3e','in_progress'=>'#4299e1','completed'=>'#38a169','cancelled'=>'#a0aec0'];
 
@@ -116,17 +170,14 @@ head('Admin Dashboard');
 
 <div class="ctr sec" style="padding-top:1.5rem">
 
- <!-- TABS -->
- <div class="tabs">
-  <button class="tab <?=$tab==='overview'?'on':''?>" onclick="sw('overview')">📊 Overview</button>
-  <button class="tab <?=$tab==='artisans'?'on':''?>" onclick="sw('artisans')">🔨 Artisans <span style="background:var(--green);color:#fff;border-radius:20px;padding:.05rem .4rem;font-size:.7rem"><?=count($artisans)?></span></button>
-  <button class="tab <?=$tab==='users'?'on':''?>" onclick="sw('users')">👥 Users <span style="background:var(--green);color:#fff;border-radius:20px;padding:.05rem .4rem;font-size:.7rem"><?=count($users)?></span></button>
-  <button class="tab <?=$tab==='bookings'?'on':''?>" onclick="sw('bookings')">📋 Bookings</button>
-  <button class="tab <?=$tab==='reviews'?'on':''?>" onclick="sw('reviews')">⭐ Reviews</button>
- </div>
+ <nav class="tabs" aria-label="Admin sections">
+  <?php foreach ($tabs as $key => $label): ?>
+  <a href="admin.php?t=<?=e($key)?>" class="tab <?=$tab===$key?'on':''?>"<?=$tab===$key?' aria-current="page"':''?>><?=e($label)?></a>
+  <?php endforeach ?>
+ </nav>
 
- <!-- ── OVERVIEW ──────────────────────────────────────────── -->
- <div id="tp-overview" class="tp <?=$tab==='overview'?'on':''?>">
+ <?php if ($tab === 'overview'): ?>
+ <div>
   <!-- STAT CARDS -->
   <div class="g4" style="margin-bottom:1.5rem">
    <?php
@@ -147,6 +198,8 @@ head('Admin Dashboard');
    </div>
    <?php endforeach ?>
   </div>
+
+  <p style="margin-bottom:1.2rem"><a href="admin.php?t=artisans&amp;verification=needs_verification" class="btn btn-o">Needs verification (<?=$stats['needs_verification']?>)</a></p>
 
   <!-- QUICK STATS -->
   <div class="g2">
@@ -182,7 +235,7 @@ head('Admin Dashboard');
     <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Joined</th></tr></thead>
     <tbody>
     <?php
-    $recent = db()->query("SELECT * FROM users ORDER BY created_at DESC LIMIT 10")->fetchAll();
+    $recent = db()->query("SELECT first_name, last_name, email, role, created_at FROM users ORDER BY created_at DESC, user_id DESC LIMIT 10")->fetchAll();
     foreach($recent as $u): ?>
     <tr>
      <td><?=e($u['first_name'].' '.$u['last_name'])?></td>
@@ -197,22 +250,29 @@ head('Admin Dashboard');
   </div>
  </div>
 
+ <?php elseif ($tab === 'artisans'): ?>
+
  <!-- ── ARTISANS ───────────────────────────────────────────── -->
- <div id="tp-artisans" class="tp <?=$tab==='artisans'?'on':''?>">
+ <div>
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.7rem;margin-bottom:1rem">
-   <h3 style="font-weight:700">Registered Artisans (<?=count($artisans)?>)</h3>
-   <form method="get" style="display:flex;gap:.5rem">
+   <h3 style="font-weight:700">Registered Artisans (<?=$total?>)</h3>
+   <form method="get" style="display:flex;flex-wrap:wrap;gap:.5rem">
     <input type="hidden" name="t" value="artisans">
-    <input name="q" class="fc" placeholder="Search artisans…" value="<?=e($search)?>" style="width:220px">
+    <input name="q" class="fc" aria-label="Search artisans" placeholder="Search artisans…" value="<?=e($search)?>" style="width:220px">
+    <select name="verification" class="fc" aria-label="Verification status" style="width:auto">
+     <?php foreach ($verificationOptions as $value => $label): ?>
+     <option value="<?=e($value)?>"<?=$verification===$value?' selected':''?>><?=e($label)?></option>
+     <?php endforeach ?>
+    </select>
     <button class="btn btn-p btn-sm" type="submit">Search</button>
-    <?php if($search): ?><a href="admin.php?t=artisans" class="btn btn-o btn-sm">Clear</a><?php endif ?>
+    <?php if($search !== '' || $verification !== ''): ?><a href="admin.php?t=artisans" class="btn btn-o btn-sm">Clear</a><?php endif ?>
    </form>
   </div>
   <div class="tw">
   <table>
    <thead><tr><th>Name</th><th>Trade</th><th>Location</th><th>Rating</th><th>Status</th><th>Joined</th><th>Actions</th></tr></thead>
    <tbody>
-   <?php foreach($artisans as $a): ?>
+   <?php foreach($rows as $a): ?>
    <tr>
     <td>
      <a href="profile.php?id=<?=$a['profile_id']?>" target="_blank" style="font-weight:600"><?=e($a['first_name'].' '.$a['last_name'])?></a>
@@ -220,7 +280,7 @@ head('Admin Dashboard');
     </td>
     <td><?=e($a['trade_category'])?><br><small style="color:var(--light)"><?=e($a['trade_subcategory']??'')?></small></td>
     <td style="font-size:.85rem"><?=e($a['lga_of_operation']??'')?><?=$a['lga_of_operation']?', ':''?><?=e($a['state_of_operation']??'')?></td>
-    <td><?=stars((float)$a['average_rating'],false)?> <span style="font-size:.78rem;color:var(--light)">(<?=$a['total_reviews']?>)</span></td>
+    <td><?php if ((int)$a['total_reviews'] > 0): ?><?=stars((float)$a['average_rating'],false)?> <span style="font-size:.78rem;color:var(--light)">(<?=$a['total_reviews']?>)</span><?php else: ?>No reviews yet<?php endif ?></td>
     <td>
      <span class="b <?=$a['verification_status']==='verified'?'b-g':($a['verification_status']==='pending'?'b-gold':'b-gr')?>"><?=ucfirst($a['verification_status'])?></span>
      <?php if($a['is_available']): ?><br><span class="b b-g" style="font-size:.68rem;margin-top:.2rem">Available</span><?php else: ?><br><span class="b b-r" style="font-size:.68rem;margin-top:.2rem">Unavailable</span><?php endif ?>
@@ -251,19 +311,21 @@ head('Admin Dashboard');
     </td>
    </tr>
    <?php endforeach ?>
-   <?php if(!$artisans): ?><tr><td colspan="7" style="text-align:center;color:var(--light);padding:2rem">No artisans found</td></tr><?php endif ?>
+   <?php if(!$rows): ?><tr><td colspan="7" style="text-align:center;color:var(--light);padding:2rem">No artisans found</td></tr><?php endif ?>
    </tbody>
   </table>
   </div>
  </div>
 
+ <?php elseif ($tab === 'users'): ?>
+
  <!-- ── USERS ─────────────────────────────────────────────── -->
- <div id="tp-users" class="tp <?=$tab==='users'?'on':''?>">
+ <div>
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.7rem;margin-bottom:1rem">
-   <h3 style="font-weight:700">All Users (<?=count($users)?>)</h3>
-   <form method="get" style="display:flex;gap:.5rem">
+   <h3 style="font-weight:700">All Users (<?=$total?>)</h3>
+   <form method="get" style="display:flex;flex-wrap:wrap;gap:.5rem">
     <input type="hidden" name="t" value="users">
-    <input name="q" class="fc" placeholder="Search users…" value="<?=e($search)?>" style="width:220px">
+    <input name="q" class="fc" aria-label="Search users" placeholder="Search users…" value="<?=e($search)?>" style="width:220px">
     <button class="btn btn-p btn-sm" type="submit">Search</button>
     <?php if($search): ?><a href="admin.php?t=users" class="btn btn-o btn-sm">Clear</a><?php endif ?>
    </form>
@@ -272,7 +334,7 @@ head('Admin Dashboard');
   <table>
    <thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Role</th><th>Joined</th><th>Actions</th></tr></thead>
    <tbody>
-   <?php foreach($users as $u): ?>
+   <?php foreach($rows as $u): ?>
    <tr>
     <td><?=e($u['first_name'].' '.$u['last_name'])?></td>
     <td style="font-size:.85rem"><?=e($u['email'])?></td>
@@ -280,7 +342,7 @@ head('Admin Dashboard');
     <td><span class="b <?=$u['role']==='artisan'?'b-g':($u['role']==='admin'?'b-bl':'b-gr')?>"><?=ucfirst($u['role'])?></span></td>
     <td style="font-size:.8rem;color:var(--light)"><?=date('d M Y',strtotime($u['created_at']))?></td>
     <td>
-     <?php if($u['user_id']!==$myId): ?>
+     <?php if((int)$u['user_id']!==$myId): ?>
      <form method="post" style="display:inline" onsubmit="return confirm('Permanently delete this user?')">
       <input type="hidden" name="_csrf" value="<?=$csrf?>">
       <input type="hidden" name="action" value="delete_user">
@@ -291,19 +353,22 @@ head('Admin Dashboard');
     </td>
    </tr>
    <?php endforeach ?>
+   <?php if (!$rows): ?><tr><td colspan="6" style="text-align:center;padding:2rem">No users found</td></tr><?php endif ?>
    </tbody>
   </table>
   </div>
  </div>
 
+ <?php elseif ($tab === 'bookings'): ?>
+
  <!-- ── BOOKINGS ───────────────────────────────────────────── -->
- <div id="tp-bookings" class="tp <?=$tab==='bookings'?'on':''?>">
-  <h3 style="font-weight:700;margin-bottom:1rem">All Bookings (<?=count($bookings)?>)</h3>
+ <div>
+  <h3 style="font-weight:700;margin-bottom:1rem">All Bookings (<?=$total?>)</h3>
   <div class="tw">
   <table>
    <thead><tr><th>Customer</th><th>Artisan</th><th>Trade</th><th>Description</th><th>Price</th><th>Status</th><th>Date</th></tr></thead>
    <tbody>
-   <?php foreach($bookings as $bk): ?>
+   <?php foreach($rows as $bk): ?>
    <tr>
     <td><?=e($bk['cust_first'].' '.$bk['cust_last'])?></td>
     <td><?=e($bk['art_first'].' '.$bk['art_last'])?></td>
@@ -314,20 +379,22 @@ head('Admin Dashboard');
     <td style="font-size:.78rem;color:var(--light);white-space:nowrap"><?=date('d M Y',strtotime($bk['created_at']))?></td>
    </tr>
    <?php endforeach ?>
-   <?php if(!$bookings): ?><tr><td colspan="7" style="text-align:center;color:var(--light);padding:2rem">No bookings yet</td></tr><?php endif ?>
+   <?php if(!$rows): ?><tr><td colspan="7" style="text-align:center;color:var(--light);padding:2rem">No bookings yet</td></tr><?php endif ?>
    </tbody>
   </table>
   </div>
  </div>
 
+ <?php elseif ($tab === 'reviews'): ?>
+
  <!-- ── REVIEWS ────────────────────────────────────────────── -->
- <div id="tp-reviews" class="tp <?=$tab==='reviews'?'on':''?>">
-  <h3 style="font-weight:700;margin-bottom:1rem">All Reviews (<?=count($reviews)?>)</h3>
+ <div>
+  <h3 style="font-weight:700;margin-bottom:1rem">All Reviews (<?=$total?>)</h3>
   <div class="tw">
   <table>
    <thead><tr><th>Customer</th><th>Artisan</th><th>Rating</th><th>Title</th><th>Date</th></tr></thead>
    <tbody>
-   <?php foreach($reviews as $rv): ?>
+   <?php foreach($rows as $rv): ?>
    <tr>
     <td><?=e($rv['cust_first'].' '.$rv['cust_last'])?></td>
     <td><?=e($rv['art_first'].' '.$rv['art_last'])?></td>
@@ -336,21 +403,25 @@ head('Admin Dashboard');
     <td style="font-size:.78rem;color:var(--light)"><?=date('d M Y',strtotime($rv['created_at']))?></td>
    </tr>
    <?php endforeach ?>
-   <?php if(!$reviews): ?><tr><td colspan="5" style="text-align:center;color:var(--light);padding:2rem">No reviews yet</td></tr><?php endif ?>
+   <?php if(!$rows): ?><tr><td colspan="5" style="text-align:center;color:var(--light);padding:2rem">No reviews yet</td></tr><?php endif ?>
    </tbody>
   </table>
   </div>
  </div>
+ <?php endif ?>
+
+ <?php if ($tab !== 'overview' && $totalPages > 1): ?>
+ <nav aria-label="Pagination" style="display:flex;align-items:center;justify-content:center;gap:.8rem;margin-top:1rem">
+  <?php if ($page > 1): ?>
+   <a class="btn btn-o btn-sm" href="admin.php?<?=e(http_build_query($listQuery + ['page'=>$page-1]))?>">Previous</a>
+  <?php endif ?>
+  <span>Page <?=$page?> of <?=$totalPages?></span>
+  <?php if ($page < $totalPages): ?>
+   <a class="btn btn-o btn-sm" href="admin.php?<?=e(http_build_query($listQuery + ['page'=>$page+1]))?>">Next</a>
+  <?php endif ?>
+ </nav>
+ <?php endif ?>
 
 </div>
-
-<script>
-function sw(t){
-  document.querySelectorAll('.tp,.tab').forEach(el=>el.classList.remove('on'));
-  document.getElementById('tp-'+t).classList.add('on');
-  document.querySelectorAll('.tab').forEach(el=>{if(el.textContent.toLowerCase().includes(t.substring(0,4)))el.classList.add('on');});
-}
-(function(){const p=new URLSearchParams(location.search);const t=p.get('t');if(t)sw(t);})();
-</script>
 
 <?php foot(); ?>
