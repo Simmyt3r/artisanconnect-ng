@@ -22,13 +22,23 @@ $pf->execute([$pid]); $portfolio = $pf->fetchAll();
 $sv = db()->prepare("SELECT * FROM services WHERE artisan_id=? AND is_active=1 ORDER BY created_at");
 $sv->execute([$pid]); $services = $sv->fetchAll();
 
-// Reviews
+// Use the same review rows for the rating, count, and list.
+$reviewFrom = 'FROM reviews r JOIN users u ON r.customer_user_id=u.user_id WHERE r.artisan_id=?';
+$reviewStats = db()->prepare("SELECT COUNT(*) AS total, AVG(r.overall_rating) AS average_rating $reviewFrom");
+$reviewStats->execute([$pid]);
+$rating = $reviewStats->fetch();
+$reviewCount = (int)$rating['total'];
+$reviewsPerPage = 20;
+$reviewPages = max(1, (int)ceil($reviewCount / $reviewsPerPage));
+$reviewPage = min($reviewPages, max(1, filter_var($_GET['reviews_page'] ?? 1, FILTER_VALIDATE_INT) ?: 1));
+$reviewOffset = ($reviewPage - 1) * $reviewsPerPage;
+$showReviews = isset($_GET['reviews_page']);
 $rv = db()->prepare("
-    SELECT r.*, u.first_name, u.last_name
-    FROM reviews r JOIN users u ON r.customer_user_id=u.user_id
-    WHERE r.artisan_id=? ORDER BY r.created_at DESC LIMIT 20
+    SELECT r.*, u.first_name, u.last_name $reviewFrom
+    ORDER BY r.created_at DESC, r.review_id DESC LIMIT $reviewsPerPage OFFSET $reviewOffset
 ");
-$rv->execute([$pid]); $reviews = $rv->fetchAll();
+$rv->execute([$pid]);
+$reviews = $rv->fetchAll();
 
 // ── HANDLE BOOKING SUBMIT ─────────────────────────────────
 if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='book') {
@@ -39,6 +49,13 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='book') {
     $sid    = (int)($_POST['service_id']??0) ?: null;
     $price  = (float)($_POST['agreed_price']??0) ?: null;
     if (!$desc) { flash('error','Please describe the work you need.'); redirect("profile.php?id=$pid"); }
+    if ($price !== null && $price < 0) { flash('error','Budget cannot be negative.'); redirect("profile.php?id=$pid"); }
+    if ($a['verification_status'] !== 'verified' || !(int)$a['is_available']) { flash('error','This artisan is not currently available for bookings.'); redirect("profile.php?id=$pid"); }
+    if ($sid !== null) {
+        $serviceCheck = db()->prepare("SELECT service_id FROM services WHERE service_id=? AND artisan_id=? AND is_active=1");
+        $serviceCheck->execute([$sid, $pid]);
+        if (!$serviceCheck->fetch()) { flash('error','Please select a valid service.'); redirect("profile.php?id=$pid"); }
+    }
 
     $ins = db()->prepare("INSERT INTO bookings (customer_user_id,artisan_id,service_id,booking_description,agreed_price) VALUES (?,?,?,?,?)");
     $ins->execute([uid(),$pid,$sid,$desc,$price]);
@@ -58,9 +75,16 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='start_conv'
     $c = db()->prepare("SELECT conversation_id FROM conversations WHERE user1_id=? AND user2_id=?");
     $c->execute([$u1,$u2]); $conv = $c->fetch();
     if (!$conv) {
-        $ic = db()->prepare("INSERT INTO conversations (user1_id,user2_id) VALUES (?,?)");
-        $ic->execute([$u1,$u2]);
-        $convId = db()->lastInsertId();
+        try {
+            $ic = db()->prepare("INSERT INTO conversations (user1_id,user2_id) VALUES (?,?)");
+            $ic->execute([$u1,$u2]);
+            $convId = db()->lastInsertId();
+        } catch (PDOException $ex) {
+            // Another request may have created the unique conversation first.
+            $c->execute([$u1,$u2]); $existing = $c->fetch();
+            if (!$existing) throw $ex;
+            $convId = $existing['conversation_id'];
+        }
     } else { $convId = $conv['conversation_id']; }
     redirect("messages.php?conv=$convId");
 }
@@ -85,7 +109,9 @@ head(e($fullName).' — Artisan Profile');
    </div>
    <p style="opacity:.88;margin-bottom:.4rem">🛠 <?=e($a['trade_category'])?><?=$a['trade_subcategory']?' — '.e($a['trade_subcategory']):''; ?> · 📍 <?=e($a['lga_of_operation'])?>, <?=e($a['state_of_operation'])?></p>
    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;opacity:.9">
-    <?=stars((float)$a['average_rating'])?> <span style="font-size:.85rem">(<?=e($a['total_reviews'])?> review<?=$a['total_reviews']!=1?'s':''?>)</span>
+    <?php if ($reviewCount > 0): ?>
+    <?=stars((float)$rating['average_rating'])?> <span style="font-size:.85rem">(<?=$reviewCount?> review<?=$reviewCount!==1?'s':''?>)</span>
+    <?php else: ?><span style="font-size:.85rem">No reviews yet</span><?php endif ?>
     · <span style="font-size:.85rem">⏱ <?=$a['years_experience']?> yrs experience</span>
     · <span style="font-size:.85rem">📅 Joined <?=date('M Y',strtotime($a['joined']))?></span>
    </div>
@@ -118,17 +144,17 @@ head(e($fullName).' — Artisan Profile');
 
    <!-- TABS: Portfolio / Services / Reviews -->
    <div class="tabs">
-    <button class="tab on" onclick="sw('portfolio')">🖼 Portfolio (<?=count($portfolio)?>)</button>
+    <button class="tab <?=$showReviews?'':'on'?>" onclick="sw('portfolio')">🖼 Portfolio (<?=count($portfolio)?>)</button>
     <button class="tab" onclick="sw('services')">🛠 Services (<?=count($services)?>)</button>
-    <button class="tab" onclick="sw('reviews')">⭐ Reviews (<?=$a['total_reviews']?>)</button>
+    <button class="tab <?=$showReviews?'on':''?>" onclick="sw('reviews')">⭐ Reviews (<?=$reviewCount?>)</button>
    </div>
 
    <!-- PORTFOLIO -->
-   <div id="tp-portfolio" class="tp on">
+   <div id="tp-portfolio" class="tp <?=$showReviews?'':'on'?>">
     <?php if($portfolio): ?>
     <div class="pg">
      <?php foreach($portfolio as $i=>$p): ?>
-     <div class="pi" onclick="showLb('<?=e(imgUrl($p['image_path']))?>','<?=e(addslashes($p['item_title']))?>')">
+     <div class="pi" onclick='showLb(<?=e(json_encode(imgUrl($p['image_path']), JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP))?>,<?=e(json_encode($p['item_title'], JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_TAG|JSON_HEX_AMP))?>)'>
       <img src="<?=e(imgUrl($p['image_path']))?>" alt="<?=e($p['item_title'])?>" loading="lazy">
       <div class="pio"><?=e($p['item_title'])?></div>
      </div>
@@ -159,7 +185,7 @@ head(e($fullName).' — Artisan Profile');
    </div>
 
    <!-- REVIEWS -->
-   <div id="tp-reviews" class="tp">
+   <div id="tp-reviews" class="tp <?=$showReviews?'on':''?>">
     <?php if($reviews): ?>
     <?php foreach($reviews as $rv): ?>
     <div class="card" style="margin-bottom:.9rem">
@@ -182,7 +208,18 @@ head(e($fullName).' — Artisan Profile');
      <?php endif ?>
     </div>
     <?php endforeach ?>
-    <?php else: ?><div class="es"><div class="ei">⭐</div><p>No reviews yet. Be the first to review!</p></div><?php endif ?>
+    <?php if ($reviewPages > 1): ?>
+    <nav aria-label="Review pages" style="display:flex;align-items:center;justify-content:center;gap:.8rem">
+     <?php if ($reviewPage > 1): ?>
+     <a class="btn btn-o btn-sm" href="profile.php?id=<?=$pid?>&amp;reviews_page=<?=$reviewPage-1?>#tp-reviews">Previous</a>
+     <?php endif ?>
+     <span>Page <?=$reviewPage?> of <?=$reviewPages?></span>
+     <?php if ($reviewPage < $reviewPages): ?>
+     <a class="btn btn-o btn-sm" href="profile.php?id=<?=$pid?>&amp;reviews_page=<?=$reviewPage+1?>#tp-reviews">Next</a>
+     <?php endif ?>
+    </nav>
+    <?php endif ?>
+    <?php else: ?><div class="es"><div class="ei">⭐</div><p>No reviews yet.</p></div><?php endif ?>
    </div>
   </div>
 

@@ -13,54 +13,72 @@ $states = ['Abia','Adamawa','Akwa Ibom','Anambra','Bauchi','Bayelsa','Benue','Bo
            'Yobe','Zamfara'];
 
 // ── SEARCH & FILTER ─────────────────────────────────────────
-$trade  = trim($_GET['trade']  ?? '');
-$state  = trim($_GET['state']  ?? '');
-$q      = trim($_GET['q']      ?? '');
-$minRat = (float)($_GET['rating'] ?? 0);
-$page   = max(1, (int)($_GET['page'] ?? 1));
-$perPage = 9;
-$offset  = ($page - 1) * $perPage;
+$trade = is_string($_GET['trade'] ?? null) ? trim($_GET['trade']) : '';
+$state = is_string($_GET['state'] ?? null) ? trim($_GET['state']) : '';
+$q = is_string($_GET['q'] ?? null) ? trim($_GET['q']) : '';
+$minRat = is_numeric($_GET['rating'] ?? null) ? (float)$_GET['rating'] : 0;
+$minRat = max(0, min(5, $minRat));
+$searching = isset($_GET['browse']) || $trade !== '' || $state !== '' || $q !== '' || $minRat > 0;
+$page = max(1, filter_var($_GET['page'] ?? 1, FILTER_VALIDATE_INT) ?: 1);
+$perPage = $searching ? 9 : 6;
 
-$where = ['a.verification_status = ?', 'a.is_available = 1'];
-$params = ['verified']; // Note: is_available = 1 is hardcoded, no placeholder needed
-
-if ($trade) { $where[] = 'a.trade_category = ?'; $params[] = $trade; }
-if ($state) { $where[] = 'a.state_of_operation = ?'; $params[] = $state; }
-if ($q)     { $where[] = "(u.first_name LIKE ? OR u.last_name LIKE ? OR a.bio LIKE ? OR a.trade_category LIKE ?)";
-               $params = array_merge($params, ["%$q%","%$q%","%$q%","%$q%"]); }
-if ($minRat) { $where[] = 'a.average_rating >= ?'; $params[] = $minRat; }
-
+$where = ["a.verification_status = 'verified'", 'a.is_available = 1'];
+$params = [];
+if ($trade !== '') {
+    $where[] = 'a.trade_category = ?';
+    $params[] = $trade;
+}
+if ($state !== '') {
+    $where[] = 'a.state_of_operation = ?';
+    $params[] = $state;
+}
+if ($q !== '') {
+    $needle = '%' . strtr(preg_replace('/\s+/', ' ', $q), ['!' => '!!', '%' => '!%', '_' => '!_']) . '%';
+    $where[] = "(CONCAT_WS(' ', u.first_name, u.last_name) LIKE ? ESCAPE '!'
+        OR a.bio LIKE ? ESCAPE '!'
+        OR a.trade_category LIKE ? ESCAPE '!'
+        OR a.trade_subcategory LIKE ? ESCAPE '!'
+        OR a.state_of_operation LIKE ? ESCAPE '!'
+        OR a.lga_of_operation LIKE ? ESCAPE '!'
+        OR EXISTS (
+            SELECT 1 FROM services s WHERE s.artisan_id = a.profile_id AND s.is_active = 1
+            AND (s.service_title LIKE ? ESCAPE '!' OR s.service_description LIKE ? ESCAPE '!')
+        ))";
+    $params = array_merge($params, array_fill(0, 8, $needle));
+}
+$from = 'FROM artisan_profiles a JOIN users u ON a.user_id = u.user_id';
+$reviewJoin = 'LEFT JOIN (
+    SELECT r.artisan_id, COUNT(*) AS total_reviews, AVG(r.overall_rating) AS average_rating
+    FROM reviews r JOIN users reviewer ON reviewer.user_id = r.customer_user_id
+    GROUP BY r.artisan_id
+) ratings ON ratings.artisan_id = a.profile_id';
+if ($minRat > 0) {
+    $where[] = 'ratings.average_rating >= ?';
+    $params[] = $minRat;
+}
 $whereSQL = 'WHERE ' . implode(' AND ', $where);
 
-// Total count
-$cntStmt = db()->prepare("SELECT COUNT(*) FROM artisan_profiles a JOIN users u ON a.user_id=u.user_id $whereSQL");
-$cntStmt->execute($params);
-$total = (int)$cntStmt->fetchColumn();
-$totalPages = max(1, ceil($total / $perPage));
-
-// Fetch page
-$params[] = $perPage; $params[] = $offset;
+$totalPages = 1;
+if ($searching) {
+    $countFrom = $minRat > 0 ? "$from $reviewJoin" : $from;
+    $cntStmt = db()->prepare("SELECT COUNT(*) $countFrom $whereSQL");
+    $cntStmt->execute($params);
+    $total = (int)$cntStmt->fetchColumn();
+    $totalPages = max(1, (int)ceil($total / $perPage));
+}
+$page = min($page, $totalPages);
+$offset = ($page - 1) * $perPage;
 $stmt = db()->prepare("
     SELECT a.profile_id, a.trade_category, a.state_of_operation, a.lga_of_operation,
-           a.average_rating, a.total_reviews, a.verification_status,
+           COALESCE(ratings.average_rating, 0) AS average_rating,
+           COALESCE(ratings.total_reviews, 0) AS total_reviews,
            u.first_name, u.last_name, u.profile_picture
-    FROM artisan_profiles a
-    JOIN users u ON a.user_id = u.user_id
-    $whereSQL
-    ORDER BY a.average_rating DESC, a.total_reviews DESC
-    LIMIT ? OFFSET ?
+    $from $reviewJoin $whereSQL
+    ORDER BY average_rating DESC, total_reviews DESC, a.profile_id ASC
+    LIMIT $perPage OFFSET $offset
 ");
 $stmt->execute($params);
 $artisans = $stmt->fetchAll();
-
-// Featured (homepage — no filters active)
-$featured = [];
-if (!$trade && !$state && !$q && !$minRat) {
-    $fs = db()->query("SELECT a.profile_id, a.trade_category, a.state_of_operation, a.average_rating, a.total_reviews, u.first_name, u.last_name, u.profile_picture FROM artisan_profiles a JOIN users u ON a.user_id=u.user_id WHERE a.verification_status='verified' ORDER BY a.average_rating DESC LIMIT 6");
-    $featured = $fs->fetchAll();
-}
-
-$searching = ($trade || $state || $q || $minRat);
 
 head('Find Skilled Artisans');
 ?>
@@ -75,27 +93,29 @@ head('Find Skilled Artisans');
 
   <!-- SEARCH FORM -->
   <form method="get" action="index.php" style="background:rgba(255,255,255,.12);backdrop-filter:blur(10px);border-radius:var(--r);padding:1.3rem;max-width:700px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr auto;gap:.8rem">
-   <input name="q" class="fc" placeholder="Search by name or skill…" value="<?=e($q)?>">
-   <select name="trade" class="fc">
+   <input type="hidden" name="browse" value="1">
+   <input name="q" class="fc" aria-label="Name, skill, or location" placeholder="Name, skill, or location…" value="<?=e($q)?>">
+   <select name="trade" class="fc" aria-label="Trade">
     <option value="">All Trades</option>
     <?php foreach($categories as $c): ?>
     <option value="<?=e($c)?>" <?=$trade===$c?'selected':''?>><?=e($c)?></option>
     <?php endforeach ?>
    </select>
    <button class="btn btn-g" type="submit">🔍 Search</button>
-   <select name="state" class="fc">
+   <select name="state" class="fc" aria-label="State">
     <option value="">All States</option>
     <?php foreach($states as $s): ?>
     <option value="<?=e($s)?>" <?=$state===$s?'selected':''?>><?=e($s)?></option>
     <?php endforeach ?>
    </select>
-   <select name="rating" class="fc">
+   <select name="rating" class="fc" aria-label="Minimum rating">
     <option value="">Any Rating</option>
     <option value="4" <?=$minRat>=4?'selected':''?>>4★ & above</option>
     <option value="3" <?=($minRat>=3&&$minRat<4)?'selected':''?>>3★ & above</option>
    </select>
    <div></div>
   </form>
+  <a href="index.php?browse=1" class="btn btn-g btn-sm" style="margin-top:1rem">Browse all artisans</a>
  </div>
 </section>
 
@@ -103,11 +123,11 @@ head('Find Skilled Artisans');
 <div style="background:var(--white);border-bottom:1px solid var(--border);padding:.8rem 0">
  <div class="ctr" style="display:flex;gap:2rem;justify-content:center;flex-wrap:wrap;text-align:center">
   <?php
-  $totA = db()->query("SELECT COUNT(*) FROM artisan_profiles WHERE verification_status='verified'")->fetchColumn();
-  $totT = db()->query("SELECT COUNT(DISTINCT trade_category) FROM artisan_profiles WHERE verification_status='verified'")->fetchColumn();
+  $totA = db()->query("SELECT COUNT(*) FROM artisan_profiles WHERE verification_status='verified' AND is_available=1")->fetchColumn();
+  $totT = db()->query("SELECT COUNT(DISTINCT trade_category) FROM artisan_profiles WHERE verification_status='verified' AND is_available=1")->fetchColumn();
   $totB = db()->query("SELECT COUNT(*) FROM bookings WHERE status='completed'")->fetchColumn();
   ?>
-  <div><div style="font-size:1.5rem;font-weight:800;color:var(--green)"><?=number_format($totA)?></div><div style="font-size:.8rem;color:var(--light)">Verified Artisans</div></div>
+  <div><div style="font-size:1.5rem;font-weight:800;color:var(--green)"><?=number_format($totA)?></div><div style="font-size:.8rem;color:var(--light)">Available Verified Artisans</div></div>
   <div><div style="font-size:1.5rem;font-weight:800;color:var(--green)"><?=number_format($totT)?></div><div style="font-size:.8rem;color:var(--light)">Trade Categories</div></div>
   <div><div style="font-size:1.5rem;font-weight:800;color:var(--green)"><?=number_format($totB)?></div><div style="font-size:.8rem;color:var(--light)">Jobs Completed</div></div>
   <div><div style="font-size:1.5rem;font-weight:800;color:var(--green)">37</div><div style="font-size:.8rem;color:var(--light)">States &amp; FCT</div></div>
@@ -115,18 +135,18 @@ head('Find Skilled Artisans');
 </div>
 
 <!-- FEATURED ───────────────────────────────────────────── -->
-<?php if ($featured): ?>
+<?php if ($artisans): ?>
 <section class="sec">
  <div class="ctr">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem;flex-wrap:wrap;gap:.5rem">
    <div>
-    <h2 style="font-size:1.4rem;font-weight:800">⭐ Top-Rated Artisans</h2>
-    <p style="color:var(--light);font-size:.9rem">Verified professionals with the highest customer ratings</p>
+    <h2 style="font-size:1.4rem;font-weight:800">Featured Artisans</h2>
+    <p style="color:var(--light);font-size:.9rem">Verified artisans available for hire</p>
    </div>
-   <a href="index.php?rating=3" class="btn btn-o btn-sm">View All →</a>
+   <a href="index.php?browse=1" class="btn btn-o btn-sm">View All →</a>
   </div>
   <div class="g3">
-   <?php foreach($featured as $a): artisanCard($a); endforeach ?>
+   <?php foreach($artisans as $a): artisanCard($a); endforeach ?>
   </div>
  </div>
 </section>
@@ -156,7 +176,7 @@ head('Find Skilled Artisans');
 <?php else: // ── SEARCH RESULTS MODE ───────────────────────────── ?>
 <div class="ph">
  <div class="ctr">
-  <h1>🔍 Search Results</h1>
+  <h1><?=$q !== '' || $trade !== '' || $state !== '' || $minRat > 0 ? 'Search Results' : 'Browse Artisans'?></h1>
   <p><?=$total?> artisan<?=$total!=1?'s':''?> found<?=$q?' for "'.e($q).'"':''?><?=$trade?' in '.e($trade):''?><?=$state?' · '.e($state):''?></p>
  </div>
 </div>
@@ -165,34 +185,35 @@ head('Find Skilled Artisans');
  <div class="ctr">
   <!-- FILTER BAR -->
   <form method="get" style="background:var(--white);border-radius:var(--r);padding:1rem 1.2rem;box-shadow:var(--sh);margin-bottom:1.5rem;display:flex;gap:.7rem;flex-wrap:wrap;align-items:flex-end">
+   <input type="hidden" name="browse" value="1">
    <div class="fg" style="flex:1;min-width:150px;margin:0">
-    <label style="font-size:.8rem">Keyword</label>
-    <input name="q" class="fc" placeholder="Name or skill…" value="<?=e($q)?>">
+    <label for="filter-q" style="font-size:.8rem">Keyword</label>
+    <input id="filter-q" name="q" class="fc" placeholder="Name, skill, or location…" value="<?=e($q)?>">
    </div>
    <div class="fg" style="flex:1;min-width:140px;margin:0">
-    <label style="font-size:.8rem">Trade</label>
-    <select name="trade" class="fc">
+    <label for="filter-trade" style="font-size:.8rem">Trade</label>
+    <select id="filter-trade" name="trade" class="fc">
      <option value="">All</option>
      <?php foreach($categories as $c): ?><option value="<?=e($c)?>" <?=$trade===$c?'selected':''?>><?=e($c)?></option><?php endforeach ?>
     </select>
    </div>
    <div class="fg" style="flex:1;min-width:130px;margin:0">
-    <label style="font-size:.8rem">State</label>
-    <select name="state" class="fc">
+    <label for="filter-state" style="font-size:.8rem">State</label>
+    <select id="filter-state" name="state" class="fc">
      <option value="">All</option>
      <?php foreach($states as $s): ?><option value="<?=e($s)?>" <?=$state===$s?'selected':''?>><?=e($s)?></option><?php endforeach ?>
     </select>
    </div>
    <div class="fg" style="min-width:130px;margin:0">
-    <label style="font-size:.8rem">Min Rating</label>
-    <select name="rating" class="fc">
+    <label for="filter-rating" style="font-size:.8rem">Min Rating</label>
+    <select id="filter-rating" name="rating" class="fc">
      <option value="">Any</option>
      <option value="4" <?=$minRat>=4?'selected':''?>>4★+</option>
      <option value="3" <?=($minRat>=3&&$minRat<4)?'selected':''?>>3★+</option>
     </select>
    </div>
    <button class="btn btn-p" type="submit">Apply</button>
-   <a href="index.php" class="btn btn-o">Clear</a>
+   <a href="index.php?browse=1" class="btn btn-o">Clear</a>
   </form>
 
   <?php if ($artisans): ?>
@@ -203,14 +224,14 @@ head('Find Skilled Artisans');
   <?php if ($totalPages > 1): ?>
   <div style="display:flex;justify-content:center;gap:.4rem;margin-top:2rem;flex-wrap:wrap">
    <?php
-   $qs = http_build_query(array_filter(['q'=>$q,'trade'=>$trade,'state'=>$state,'rating'=>$minRat?:""]));
+   $query = ['browse'=>1, 'q'=>$q, 'trade'=>$trade, 'state'=>$state, 'rating'=>$minRat ?: ''];
    for ($p=1; $p<=$totalPages; $p++): ?>
-   <a href="?<?=$qs?>&page=<?=$p?>" class="btn <?=$p===$page?'btn-p':'btn-o'?> btn-sm"><?=$p?></a>
+   <a href="?<?=e(http_build_query($query + ['page'=>$p]))?>"<?=$p===$page?' aria-current="page"':''?> class="btn <?=$p===$page?'btn-p':'btn-o'?> btn-sm"><?=$p?></a>
    <?php endfor ?>
   </div>
   <?php endif ?>
   <?php else: ?>
-  <div class="es"><div class="ei">🔍</div><h3>No artisans found</h3><p>Try adjusting your search filters</p><br><a href="index.php" class="btn btn-p">Clear Search</a></div>
+  <div class="es"><div class="ei">🔍</div><h3>No artisans found</h3><p>Try adjusting your search filters</p><br><a href="index.php?browse=1" class="btn btn-p">Clear Search</a></div>
   <?php endif ?>
  </div>
 </section>
@@ -230,7 +251,9 @@ function artisanCard(array $a): void { ?>
   <div class="ac-t">🛠 <?=e($a['trade_category'])?> · 📍 <?=e($a['state_of_operation'])?></div>
   <?php if($a['lga_of_operation']??''): ?><div style="font-size:.78rem;color:var(--light);margin-bottom:.3rem"><?=e($a['lga_of_operation'])?></div><?php endif ?>
   <div class="ac-m">
-   <div><?=stars((float)$a['average_rating'])?> <span style="font-size:.78rem;color:var(--light)">(<?=$a['total_reviews']?>)</span></div>
+   <div><?php if ((int)$a['total_reviews'] > 0): ?>
+    <?=stars((float)$a['average_rating'])?> <span style="font-size:.78rem;color:var(--light)">(<?=$a['total_reviews']?>)</span>
+   <?php else: ?><span style="font-size:.82rem;color:var(--light)">No reviews yet</span><?php endif ?></div>
    <span class="b b-g">✓ Verified</span>
   </div>
  </div>
